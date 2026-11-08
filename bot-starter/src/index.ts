@@ -29,7 +29,7 @@ import { Identity } from "spacetimedb";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadDictionary } from "./dictionary.js";
-import { chooseWord, decideBid, shouldPlayWord } from "./strategy.js";
+import { choosePlays, decideBid } from "./strategy.js";
 
 const HOST = process.env.STDB_HOST ?? "https://maincloud.spacetimedb.com";
 const DB_NAME = process.env.STDB_DB ?? "scrabblebot";
@@ -143,17 +143,18 @@ function tryPlayWord(conn: DbConnection) {
     const key = String(matchId);
     if (now - (lastWordAttemptByMatch.get(key) ?? 0) < WORD_RETRY_MS) continue;
     lastWordAttemptByMatch.set(key, now);
-    const word = chooseWord({
+    const plays = choosePlays({
       myRack: rackForMatch(conn, matchId),
       dictionary: DICTIONARY,
+      lettersLeft,
+      myBalance: participantForMatch(conn, matchId)?.balance,
     });
-    if (!word) continue;
-    const myBalance = participantForMatch(conn, matchId)?.balance;
-    if (!shouldPlayWord({ word, lettersLeft, myBalance })) continue;
-    console.log(`[${BOT_NAME}] match ${matchId}: playing '${word}'`);
-    conn.reducers
-      .submitWord({ matchId, word })
-      .catch(logFailure(`playing '${word}'`));
+    for (const word of plays) {
+      console.log(`[${BOT_NAME}] match ${matchId}: playing '${word}'`);
+      conn.reducers
+        .submitWord({ matchId, word })
+        .catch(logFailure(`playing '${word}'`));
+    }
   }
 }
 
