@@ -21,6 +21,7 @@
 
 import {
   DbConnection,
+  tables,
   type EventContext,
   type ErrorContext,
 } from "./module_bindings/index.js";
@@ -53,6 +54,7 @@ const DICTIONARY = loadDictionary(import.meta.url);
 
 let myIdentity: Identity | null = null;
 let myBotId: bigint | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 const bidsByAuction = new Set<string>();
 const lastWordAttemptByMatch = new Map<string, number>();
 const WORD_RETRY_MS = 500;
@@ -152,6 +154,32 @@ function tryPlayWord(conn: DbConnection) {
   }
 }
 
+function subscriptionFailed(ctx: ErrorContext) {
+  console.error(
+    `[${BOT_NAME}] subscription failed: ${ctx.event?.message ?? "unknown error"}`,
+  );
+  process.exit(1);
+}
+
+// Only this bot's own matches. Subscribing to every table pulls the whole
+// history of every match ever played: millions of rows, over a minute to
+// load, and gigabytes of memory.
+function subscribeToMyMatches(conn: DbConnection, botId: bigint) {
+  const mine = tables.matchParticipant.where((p) => p.botId.eq(botId));
+  conn
+    .subscriptionBuilder()
+    .onApplied(() => bootstrapActivity(conn))
+    .onError(subscriptionFailed)
+    .subscribe([
+      mine,
+      mine.rightSemijoin(tables.matchState, (p, m) => p.matchId.eq(m.id)),
+      mine.rightSemijoin(tables.auction, (p, a) => p.matchId.eq(a.matchId)),
+      mine.rightSemijoin(tables.auctionResult, (p, r) =>
+        p.matchId.eq(r.matchId),
+      ),
+    ]);
+}
+
 function onConnect(conn: DbConnection, identity: Identity, token: string) {
   myIdentity = identity;
   saveToken(token);
@@ -183,7 +211,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
             console.log(
               `[${BOT_NAME}] claimed credential for bot '${bot?.name ?? "?"}' (id ${myBotId})`,
             );
-            bootstrapActivity(conn);
+            subscribeToMyMatches(conn, myBotId);
           }, 1000);
           return;
         } else {
@@ -198,9 +226,16 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
       console.log(
         `[${BOT_NAME}] acting as bot '${bot?.name ?? "?"}' (id ${myBotId})`,
       );
-      bootstrapActivity(conn);
+      subscribeToMyMatches(conn, myBotId);
     })
-    .subscribeToAllTables();
+    .onError(subscriptionFailed)
+    .subscribe([
+      tables.bot,
+      tables.myRack,
+      tables.openLobbies,
+      tables.openLobbyMembers,
+      `SELECT * FROM bot_credential WHERE identity = 0x${identity.toHexString()}`,
+    ]);
 
   conn.db.auction.onInsert((_ctx: EventContext, a) => {
     if (a.status.tag === "Open") tryBid(conn, a.id, a.matchId, a.letter);
@@ -244,12 +279,12 @@ function joinLobby(conn: DbConnection) {
     return m?.status.tag === "Running";
   });
   if (inRunning) return;
-  const openLobby = Array.from(conn.db.lobby.iter()).find(
+  const openLobby = Array.from(conn.db.openLobbies.iter()).find(
     (l) => l.status.tag === "Open",
   );
   const alreadyIn =
     openLobby !== undefined &&
-    Array.from(conn.db.lobbyMember.iter()).some(
+    Array.from(conn.db.openLobbyMembers.iter()).some(
       (lm) => lm.lobbyId === openLobby.id && lm.botId === myBotId,
     );
   if (alreadyIn) return;
@@ -273,6 +308,22 @@ function bootstrapActivity(conn: DbConnection) {
   tryPlayWord(conn);
 }
 
+// Both a failed connect and a dropped connection land here, and either can
+// fire alongside the other, so only one retry is ever pending: the bot must
+// never run twice at once.
+function reconnect() {
+  if (reconnectTimer) return;
+  myIdentity = null;
+  myBotId = null;
+  bidsByAuction.clear();
+  lastWordAttemptByMatch.clear();
+  console.log(`[${BOT_NAME}] reconnecting in 2s`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    main();
+  }, 2000);
+}
+
 function main() {
   console.log(`[${BOT_NAME}] connecting to ${DB_NAME} at ${HOST}`);
   DbConnection.builder()
@@ -280,10 +331,14 @@ function main() {
     .withDatabaseName(DB_NAME)
     .withToken(BOT_TOKEN ?? loadToken())
     .onConnect(onConnect)
-    .onConnectError((_ctx: ErrorContext, err: Error) =>
-      console.error("connect error:", err.message),
-    )
-    .onDisconnect(() => console.log("disconnected"))
+    .onConnectError((_ctx: ErrorContext, err: Error) => {
+      console.error("connect error:", err.message);
+      reconnect();
+    })
+    .onDisconnect(() => {
+      console.log("disconnected");
+      reconnect();
+    })
     .build();
 }
 

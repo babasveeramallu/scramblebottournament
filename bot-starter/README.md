@@ -36,12 +36,16 @@ To enter the tournament shown in the announcement, set its tournament ID before
 starting the bot:
 
 ```powershell
-$env:TOURNAMENT_ID = "2"
+$env:TOURNAMENT_ID = "3"
 npm start
 ```
 
 Keep tokens out of source files, commits, and chat. The tournament registration
 request is made by the bot when it connects.
+
+The bot subscribes only to its own matches instead of every table, so it
+starts in about a second, and it reconnects on its own if the connection
+drops. Run one instance per team.
 
 ## Checks
 
