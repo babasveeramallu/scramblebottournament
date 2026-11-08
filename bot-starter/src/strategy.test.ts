@@ -121,6 +121,16 @@ test("choosePlays empties the rack into several words at the end", () => {
   );
 });
 
+test("choosePlays skips a held best word to find a playable long word", () => {
+  const plays = choosePlays({
+    myRack: rack("NOTABLERELATION"),
+    dictionary: ["NOTABLE", "RELATION"],
+    lettersLeft: 50,
+    myBalance: 80,
+  });
+  assert.deepEqual(plays, ["RELATION"]);
+});
+
 test("loadDictionary resolves and loads the shared wordlist", () => {
   const dictionary = loadDictionary(import.meta.url);
   assert.ok(dictionary.length > 0);

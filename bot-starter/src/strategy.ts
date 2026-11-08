@@ -311,16 +311,15 @@ export function choosePlays(
   let balance = ctx.myBalance;
   const plays: string[] = [];
   while (plays.length < 6) {
-    const word = chooseWord({ myRack: rack, dictionary: ctx.dictionary });
-    if (
-      !word ||
-      !shouldPlayWord(
-        { word, lettersLeft: ctx.lettersLeft, myBalance: balance },
-        params,
-      )
-    ) {
-      break;
-    }
+    const word = bestWordMatching(
+      { myRack: rack, dictionary: ctx.dictionary },
+      (candidate) =>
+        shouldPlayWord(
+          { word: candidate, lettersLeft: ctx.lettersLeft, myBalance: balance },
+          params,
+        ),
+    );
+    if (!word) break;
     plays.push(word);
     for (const c of word) rack.set(c, (rack.get(c) ?? 0) - 1);
     if (balance !== undefined) balance += wordReward(word);
@@ -344,6 +343,13 @@ export interface WordContext {
  * auction means bids on closed auctions and words from spent letters.
  */
 export function chooseWord(ctx: WordContext): string | null {
+  return bestWordMatching(ctx, () => true);
+}
+
+function bestWordMatching(
+  ctx: WordContext,
+  accept: (word: string) => boolean,
+): string | null {
   const available = new Int16Array(26);
   let tiles = 0;
   for (const [letter, count] of ctx.myRack) {
@@ -356,7 +362,12 @@ export function chooseWord(ctx: WordContext): string | null {
   let bestWord: string | null = null;
   let bestReward = -1;
   for (const word of ctx.dictionary) {
-    if (word.length < 2 || word.length > tiles || !canSpell(word, available)) {
+    if (
+      word.length < 2 ||
+      word.length > tiles ||
+      !canSpell(word, available) ||
+      !accept(word)
+    ) {
       continue;
     }
 
