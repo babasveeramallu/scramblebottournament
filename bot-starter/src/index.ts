@@ -29,7 +29,7 @@ import { Identity } from "spacetimedb";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadDictionary } from "./dictionary.js";
-import { chooseWord, decideBid } from "./strategy.js";
+import { chooseWord, decideBid, shouldPlayWord } from "./strategy.js";
 
 const HOST = process.env.STDB_HOST ?? "https://maincloud.spacetimedb.com";
 const DB_NAME = process.env.STDB_DB ?? "scrabblebot";
@@ -116,6 +116,7 @@ function tryBid(
     letter,
     myBalance: participant.balance,
     myRack: rackForMatch(conn, matchId),
+    lettersLeft: conn.db.matchState.id.find(matchId)?.bagTotal,
   });
   if (amount <= 0) return;
   conn.reducers
@@ -131,14 +132,14 @@ function tryPlayWord(conn: DbConnection) {
   if (myBotId === null) return;
   // Only matches still being played. The bot keeps its letters from
   // matches that have ended, but can't play them.
-  const matches = new Set<bigint>();
+  const matches = new Map<bigint, number>();
   for (const p of conn.db.matchParticipant.iter()) {
     if (p.botId !== myBotId) continue;
     const m = conn.db.matchState.id.find(p.matchId);
-    if (m?.status.tag === "Running") matches.add(p.matchId);
+    if (m?.status.tag === "Running") matches.set(p.matchId, m.bagTotal);
   }
   const now = Date.now();
-  for (const matchId of matches) {
+  for (const [matchId, lettersLeft] of matches) {
     const key = String(matchId);
     if (now - (lastWordAttemptByMatch.get(key) ?? 0) < WORD_RETRY_MS) continue;
     lastWordAttemptByMatch.set(key, now);
@@ -147,6 +148,8 @@ function tryPlayWord(conn: DbConnection) {
       dictionary: DICTIONARY,
     });
     if (!word) continue;
+    const myBalance = participantForMatch(conn, matchId)?.balance;
+    if (!shouldPlayWord({ word, lettersLeft, myBalance })) continue;
     console.log(`[${BOT_NAME}] match ${matchId}: playing '${word}'`);
     conn.reducers
       .submitWord({ matchId, word })
@@ -259,6 +262,8 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
   // When a match this bot was in ends, hop back into the lobby.
   conn.db.matchState.onUpdate((_ctx, old, neu) => {
     if (myBotId === null) return;
+    // Every round shrinks the bag, which can make a held word worth playing.
+    if (neu.status.tag === "Running") tryPlayWord(conn);
     if (old.status.tag !== "Ended" && neu.status.tag === "Ended") {
       const wasIn = Array.from(conn.db.matchParticipant.iter()).some(
         (p) => p.matchId === neu.id && p.botId === myBotId,

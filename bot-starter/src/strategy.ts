@@ -11,56 +11,98 @@ export interface BidContext {
   letter: string;        // Letter being auctioned, e.g. "Q"
   myBalance: number;     // Current balance
   myRack: Map<string, number>; // Letters you currently own, letter -> count
+  lettersLeft?: number;  // Letters still in the bag (auctions after this one)
 }
 
 const VOWELS = new Set(["A", "E", "I", "O", "U"]);
-const COMMON_CONSONANTS = new Set(["R", "S", "T", "L", "N"]);
-const OTHER_COMMON_CONSONANTS = new Set(["C", "D", "M", "P", "B", "G", "H"]);
+
+// What a first copy of each letter is worth paying. Live Vickrey prices are
+// about 10 at the median and 14 at the 75th percentile, and the strongest
+// bots buy 14-23 letters a match, so bids have to reach that range to win.
+const BASE_BID: Record<string, number> = {
+  A: 13, B: 12, C: 14, D: 14, E: 14, F: 13, G: 12, H: 15, I: 12, J: 12,
+  K: 14, L: 12, M: 14, N: 13, O: 12, P: 14, Q: 12, R: 14, S: 16, T: 13,
+  U: 9, V: 10, W: 12, X: 20, Y: 14, Z: 18,
+};
+
+// Matches are ranked on score alone; balance left at the end is worthless.
+// So the bot paces itself to spend everything, counting on word income
+// (strong bots earn about 1.5-2 per auction) to fund part of it.
+const EXPECTED_INCOME_PER_AUCTION = 1.5;
+const EXPECTED_WIN_SHARE = 0.25;
+const TYPICAL_PRICE = 12;
+const DEFAULT_LETTERS_LEFT = 40;
+const ENDGAME_LETTERS = 8;
 
 /**
- * Bid for useful letters while keeping enough balance for later auctions.
+ * Bid what a letter is worth to this rack, paced so the balance is spent
+ * by the time the bag runs out.
  */
 export function decideBid(ctx: BidContext): number {
   const letter = ctx.letter.toUpperCase();
-  const value = LETTER_VALUE[letter];
+  const base = BASE_BID[letter];
   const balance = Math.floor(ctx.myBalance);
-  if (!value || !Number.isFinite(balance) || balance <= 0) return 0;
+  if (!base || !Number.isFinite(balance) || balance <= 0) return 0;
 
+  let tiles = 0;
+  let vowels = 0;
+  for (const [l, n] of ctx.myRack) {
+    tiles += n;
+    if (VOWELS.has(l)) vowels += n;
+  }
   const have = ctx.myRack.get(letter) ?? 0;
   const isVowel = VOWELS.has(letter);
-  const duplicateFactor =
-    have === 0
-      ? 1
-      : have === 1
-        ? isVowel
-          ? 0.7
-          : 0.55
-        : have === 2
-          ? isVowel
-            ? 0.45
-            : 0.25
-          : isVowel
-            ? 0.2
-            : 0;
 
-  const usefulness = isVowel
-    ? 4
-    : COMMON_CONSONANTS.has(letter)
-      ? 3
-      : OTHER_COMMON_CONSONANTS.has(letter)
-        ? 2
-        : 1;
-  let valueForBid = value + usefulness;
+  const duplicateFactors =
+    isVowel || letter === "S" ? [1, 0.85, 0.55, 0.25] : [1, 0.7, 0.35, 0.1];
+  const duplicateFactor = duplicateFactors[Math.min(have, 3)]!;
 
-  if (letter === "Q") {
-    const hasSupport =
-      (ctx.myRack.get("U") ?? 0) > 0 || (ctx.myRack.get("I") ?? 0) > 0;
-    valueForBid *= hasSupport ? 1.15 : 0.65;
+  const vowelShare = tiles > 0 ? vowels / tiles : 0.4;
+  let mixFactor = 1;
+  if (isVowel) {
+    if (vowelShare < 0.3) mixFactor = 1.25;
+    else if (vowelShare > 0.5) mixFactor = 0.6;
+  } else if (vowelShare > 0.5) {
+    mixFactor = 1.15;
+  } else if (vowelShare < 0.25 && tiles >= 4) {
+    mixFactor = 0.75;
   }
 
-  const desired = Math.max(1, Math.ceil(valueForBid * duplicateFactor));
-  const budget = Math.max(1, Math.floor(balance * 0.2));
-  return Math.min(desired, budget, balance);
+  let value = base * duplicateFactor * mixFactor;
+  if (letter === "Q") value *= (ctx.myRack.get("U") ?? 0) > 0 ? 1.1 : 0.5;
+
+  const left = Math.max(0, ctx.lettersLeft ?? DEFAULT_LETTERS_LEFT);
+  const auctionsLeft = left + 1;
+  const spendable = balance + auctionsLeft * EXPECTED_INCOME_PER_AUCTION;
+  const perWin = spendable / Math.max(1, auctionsLeft * EXPECTED_WIN_SHARE);
+  const pace = Math.min(1.8, Math.max(0.7, perWin / TYPICAL_PRICE));
+
+  // Before the endgame, never sink most of the balance into one letter.
+  const cap =
+    left <= ENDGAME_LETTERS ? balance : Math.max(1, Math.floor(balance * 0.4));
+  return Math.max(0, Math.min(Math.round(value * pace), cap, balance));
+}
+
+export interface PlayContext {
+  word: string;
+  lettersLeft?: number; // Letters still in the bag
+  myBalance?: number;
+}
+
+/**
+ * Whether to cash in `word` now. Words of 6+ letters pay 2.5-3x, so hold
+ * letters for them while the match has time, and play whatever spells a
+ * word before the bag runs out: letters still held at the end score nothing.
+ */
+export function shouldPlayWord(ctx: PlayContext): boolean {
+  const left = ctx.lettersLeft;
+  if (left === undefined) return true;
+  const length = ctx.word.length;
+  const balance = ctx.myBalance ?? Number.POSITIVE_INFINITY;
+  if (left <= 5) return true;
+  if (length >= 6 || wordReward(ctx.word) >= 24) return true;
+  if (length === 5) return left <= 20 || balance < 15;
+  return left <= 10 || balance < 8;
 }
 
 export interface WordContext {

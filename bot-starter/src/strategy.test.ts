@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { test } from "node:test";
 import { loadDictionary } from "./dictionary.js";
-import { chooseWord, decideBid } from "./strategy.js";
+import { chooseWord, decideBid, shouldPlayWord } from "./strategy.js";
 
 const rack = (letters: string) => {
   const r = new Map<string, number>();
@@ -58,9 +58,46 @@ test("decideBid prioritizes useful letters and avoids excessive duplicates", () 
 
 test("decideBid never exceeds the available balance", () => {
   assert.equal(decideBid({ letter: "Z", myBalance: 1, myRack: rack("") }), 1);
-  assert.equal(decideBid({ letter: "Z", myBalance: 10, myRack: rack("") }), 2);
+  assert.ok(decideBid({ letter: "Z", myBalance: 10, myRack: rack("") }) <= 10);
   assert.equal(decideBid({ letter: "Z", myBalance: 0, myRack: rack("") }), 0);
   assert.equal(decideBid({ letter: "?", myBalance: 100, myRack: rack("") }), 0);
+  for (const letter of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+    const bid = decideBid({
+      letter,
+      myBalance: 30,
+      myRack: rack("AEIRST"),
+      lettersLeft: 2,
+    });
+    assert.ok(bid >= 0 && bid <= 30, `${letter} bid ${bid}`);
+  }
+});
+
+test("decideBid bids at live market prices at the start of a match", () => {
+  const start = { myBalance: 100, myRack: rack("AETRN"), lettersLeft: 67 };
+  for (const letter of "DSLE") {
+    const bid = decideBid({ ...start, letter });
+    assert.ok(bid >= 11 && bid <= 40, `${letter} bid ${bid}`);
+  }
+});
+
+test("decideBid spends a hoarded balance as the bag runs out", () => {
+  const myRack = rack("AETRN");
+  const early = decideBid({ letter: "D", myBalance: 100, myRack, lettersLeft: 60 });
+  const late = decideBid({ letter: "D", myBalance: 100, myRack, lettersLeft: 3 });
+  assert.ok(late > early);
+  const broke = decideBid({ letter: "D", myBalance: 12, myRack, lettersLeft: 40 });
+  assert.ok(broke <= Math.floor(12 * 0.4));
+});
+
+test("shouldPlayWord holds short words early and cashes in late", () => {
+  assert.equal(shouldPlayWord({ word: "CAT", lettersLeft: 50, myBalance: 80 }), false);
+  assert.equal(shouldPlayWord({ word: "CATER", lettersLeft: 50, myBalance: 80 }), false);
+  assert.equal(shouldPlayWord({ word: "CRATES", lettersLeft: 50, myBalance: 80 }), true);
+  assert.equal(shouldPlayWord({ word: "ZINCS", lettersLeft: 50, myBalance: 80 }), true);
+  assert.equal(shouldPlayWord({ word: "CATER", lettersLeft: 15, myBalance: 80 }), true);
+  assert.equal(shouldPlayWord({ word: "CAT", lettersLeft: 50, myBalance: 3 }), true);
+  assert.equal(shouldPlayWord({ word: "AT", lettersLeft: 4, myBalance: 80 }), true);
+  assert.equal(shouldPlayWord({ word: "AT" }), true);
 });
 
 test("loadDictionary resolves and loads the shared wordlist", () => {
